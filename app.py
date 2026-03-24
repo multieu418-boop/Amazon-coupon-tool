@@ -56,17 +56,24 @@ tab1, tab2 = st.tabs(["🔵 阶段 1：生成提报", "🔴 阶段 2：报错解
 
 if tab1:
     if not coupon_template:
-        st.info("请先上传模板。")
+        st.info("💡 请先在左侧上传 Amazon Coupon 模板文件。")
     else:
         try:
             headers, rules, options, wb_template = AmazonCouponTool.get_template_info(coupon_template)
             
+            # 初始化一个容器来存储生成的 Excel 二进制数据
+            if 'generated_file' not in st.session_state:
+                st.session_state.generated_file = None
+
+            # --- 表单开始 ---
             with st.form("coupon_input_form"):
+                st.subheader("📝 填写 Coupon 需求")
                 user_inputs = {}
                 col1, col2 = st.columns(2)
                 for idx, name in enumerate(headers):
                     target_col = col1 if idx % 2 == 0 else col2
                     help_msg = rules.get(name, "")
+                    
                     if "ASIN 列表" in str(name):
                         raw_asin = target_col.text_area(f"📍 {name}", help=help_msg)
                         user_inputs[name] = AmazonCouponTool.clean_asin_input(raw_asin)
@@ -76,7 +83,7 @@ if tab1:
                     else:
                         user_inputs[name] = target_col.text_input(f"✍️ {name}", help=help_msg)
 
-                submit_btn = st.form_submit_button("🔥 生成标准上传文件")
+                submit_btn = st.form_submit_button("🔥 点击校验并准备文件")
 
                 if submit_btn:
                     ws = wb_template.active
@@ -84,7 +91,6 @@ if tab1:
                     while ws.cell(row=write_row, column=1).value:
                         write_row += 1
                     
-                    # 修复后的样式克隆逻辑
                     for col_idx, header_name in enumerate(headers, 1):
                         val = user_inputs.get(header_name, "")
                         new_cell = ws.cell(row=write_row, column=col_idx, value=val)
@@ -97,11 +103,25 @@ if tab1:
                                 if source_cell.alignment: new_cell.alignment = copy(source_cell.alignment)
                                 if source_cell.number_format: new_cell.number_format = source_cell.number_format
                             except:
-                                pass # 如果某项样式不支持克隆，则跳过，保证程序不崩
+                                pass
                     
                     output = BytesIO()
                     wb_template.save(output)
-                    st.download_button(label="📥 下载提报文件", data=output.getvalue(), file_name="Coupon_Ready.xlsx")
-                    st.balloons()
+                    # 将生成的文件存入 session_state，这样它就能在表单外被访问
+                    st.session_state.generated_file = output.getvalue()
+                    st.success("✅ 文件已成功生成！请点击下方的下载按钮。")
+
+            # --- 下载按钮（放在表单外） ---
+            if st.session_state.generated_file:
+                st.divider()
+                st.download_button(
+                    label="📥 点击下载提报文件 (Ready to Upload)",
+                    data=st.session_state.generated_file,
+                    file_name="Amazon_Coupon_Upload.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_btn"
+                )
+                st.balloons()
+
         except Exception as e:
             st.error(f"解析过程中出现问题: {e}")
