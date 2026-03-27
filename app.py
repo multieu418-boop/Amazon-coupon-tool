@@ -23,19 +23,33 @@ class CouponProcessor:
     def parse_error_details(comment_text):
         error_map = {}
         if not comment_text: return error_map
-        # 解析批注中的 ASIN 和 报错详情
-        # 兼容处理批注中 ASIN 后面跟随的换行符和具体报错内容
+        
+        # 1. 先按 ASIN (10位字符) 对批注进行分块
         blocks = re.split(r'([A-Z0-9]{10})\n', str(comment_text))
+        
         if len(blocks) > 1:
             for i in range(1, len(blocks), 2):
                 asin = blocks[i].strip()
                 content = blocks[i+1]
-                # 提取要求的价格：匹配“要求的净价格”、“当前净价格”或“要求的最高商品价格”后面的数字
-                req_p_match = re.search(r'(?:要求的净价格|当前净价格|要求的最高商品价格|Maximum product price allowed)：[^\d]*([\d\.]+)', content)
-                req_p = float(req_p_match.group(1)) if req_p_match else None
                 
-                reason_part = re.split(r'(?:要求的净价格|当前净价格|要求的最高商品价格|Maximum product price allowed)', content)[0]
+                # 【精准提取修复】严格匹配“要求的净价格”或“要求的最高商品价格”后面的数值
+                # 排除掉“当前净价格”，只抓取“要求的”部分
+                req_p = None
+                
+                # 优先级 1: 要求的净价格 / 要求的最高商品价格 (中文)
+                req_match = re.search(r'要求的(?:净价格|最高商品价格)：[^\d]*([\d\.]+)', content)
+                
+                # 优先级 2: Maximum product price allowed / Required net price (英文)
+                if not req_match:
+                    req_match = re.search(r'(?:Maximum product price allowed|Required net price)：[^\d]*([\d\.]+)', content)
+                
+                if req_match:
+                    req_p = float(req_match.group(1))
+                
+                # 提取报错原因（去除金额干扰）
+                reason_part = re.split(r'(?:要求的|当前|Maximum|Required)', content)[0]
                 reason = reason_part.strip().replace('\n', ' ')
+                
                 auto_exclude = "没有经验证的参考价" in reason
                 
                 error_map[asin] = {
@@ -125,7 +139,7 @@ with tab2:
         st.error("⚠️ 请在左侧【第一阶段】处上传站点空白模板，作为修复后的导出底稿。")
     else:
         if 'master_df' not in st.session_state:
-            with st.spinner("深度比对数据中..."):
+            with st.spinner("正在提取批注中的 ASIN 价格信息..."):
                 for enc in ['utf-8', 'utf-16', 'gbk', 'utf-8-sig']:
                     try:
                         all_listing_file.seek(0)
@@ -137,47 +151,51 @@ with tab2:
                 error_feedback_file.seek(0)
                 wb_err = openpyxl.load_workbook(error_feedback_file, data_only=True)
                 ws_err = wb_err.active
-                err_headers = [cell.value for cell in ws_err[7] if cell.value]
                 
-                asin_col = next((c for c in df_l.columns if 'asin' in c), None)
-                price_col = next((c for c in df_l.columns if 'price' in c or '价格' in c), None)
-                e_asin_h = next((h for h in err_headers if h and 'ASIN' in str(h)), None)
-                e_disc_h = next((h for h in err_headers if h and '折扣' in str(h) and '数值' in str(h)), None)
-
-                rows = []
-                # 建立完整的列名索引，包括亚马逊追加的 M, N 列
+                # 提取标题
                 full_raw_headers = [ws_err.cell(row=7, column=c).value for c in range(1, ws_err.max_column + 1)]
                 header_map = {h: i for i, h in enumerate(full_raw_headers) if h}
                 
+                asin_h = next((h for h in full_raw_headers if h and 'ASIN' in str(h)), None)
+                disc_h = next((h for h in full_raw_headers if h and '折扣' in str(h) and '数值' in str(h)), None)
+
+                rows = []
                 for r_idx in range(10, ws_err.max_row + 1):
                     if not any([ws_err.cell(row=r_idx, column=c).value for c in range(1, ws_err.max_column + 1)]):
                         continue
                     
-                    # 获取该行最后一列（通常是带批注的错误列）
+                    # 关键：获取批注列（通常是上传后的最后一列）
                     comment_cell = ws_err.cell(row=r_idx, column=ws_err.max_column)
                     comment_text = comment_cell.comment.text if comment_cell and comment_cell.comment else ""
                     
-                    asin_val = ws_err.cell(row=r_idx, column=header_map[e_asin_h]+1).value
+                    asin_val = ws_err.cell(row=r_idx, column=header_map[asin_h]+1).value
                     asins = [a.strip() for a in str(asin_val).replace(',', ';').replace('\n', ';').split(';') if a.strip()]
                     err_map = CouponProcessor.parse_error_details(comment_text)
                     
                     for a in asins:
-                        p_match = df_l[df_l[asin_col] == a][price_col].values if asin_col else []
-                        orig_p = p_match[0] if len(p_match) > 0 else 0
-                        info = err_map.get(a, {})
+                        asin_col_name = next((c for c in df_l.columns if 'asin' in c), None)
+                        price_col_name = next((c for c in df_l.columns if 'price' in c or '价格' in c), None)
                         
-                        curr_d = ws_err.cell(row=r_idx, column=header_map[e_disc_h]+1).value if e_disc_h in header_map else 0.05
+                        p_match = df_l[df_l[asin_col_name] == a][price_col_name].values if asin_col_name else []
+                        orig_p = p_match[0] if len(p_match) > 0 else 0
+                        
+                        info = err_map.get(a, {})
+                        req_p_val = info.get('req_price')
+                        
+                        # 计算建议折扣
+                        curr_d = ws_err.cell(row=r_idx, column=header_map[disc_h]+1).value if disc_h in header_map else 0.05
                         suggested = curr_d
-                        if a in err_map and orig_p and info.get('req_price'):
-                            needed = math.ceil(((float(orig_p) - float(info.get('req_price'))) / float(orig_p)) * 100)
+                        if req_p_val and orig_p:
+                            # 至少提高到要求净价格所需的折扣
+                            needed = math.ceil(((float(orig_p) - float(req_p_val)) / float(orig_p)) * 100)
                             suggested = needed / 100 if float(curr_d or 0) < 1 else max(needed, 5)
 
                         rows.append({
                             "决策": info.get('default_decision', "保留"), 
                             "ASIN": a, 
                             "状态": "❌ 批注报错" if a in err_map else "✅ 正常",
+                            "要求净价格": req_p_val if req_p_val else "-",
                             "详细报错原因": info.get('reason', "-"), 
-                            "要求净价格": info.get('req_price', "-"), # 确保提取结果进入数据框
                             "拟提报折扣": suggested,
                             "Listing原价": orig_p, 
                             "原始行号": r_idx
@@ -185,7 +203,6 @@ with tab2:
                 st.session_state.master_df = pd.DataFrame(rows)
 
         if st.session_state.get('master_df') is not None:
-            # 应用筛选
             mask = st.session_state.master_df['状态'].isin(status_sel)
             if reason_kw:
                 mask = mask & st.session_state.master_df['详细报错原因'].str.contains(reason_kw, case=False)
@@ -193,12 +210,11 @@ with tab2:
             df_show = st.session_state.master_df[mask].copy()
             
             st.subheader("🛠️ 修复决策台")
-            # 在 data_editor 中显式展示 “要求净价格” 列
             edited = st.data_editor(
                 df_show,
                 column_config={
                     "决策": st.column_config.SelectboxColumn("决策", options=["保留", "剔除"]),
-                    "要求净价格": st.column_config.NumberColumn("要求净价格", format="%.2f"),
+                    "要求净价格": st.column_config.TextColumn("要求净价格"), 
                     "拟提报折扣": st.column_config.NumberColumn("拟提报折扣", format="%.2f"),
                     "原始行号": None
                 },
@@ -244,5 +260,5 @@ with tab2:
                 
                 out_fix = BytesIO()
                 wb_final.save(out_fix)
-                st.success("✅ 修复版文件已基于第一阶段底稿生成，已自动剔除冗余错误列。")
+                st.success("✅ 文件已成功基于底稿生成，已更新修复后的 ASIN 及折扣。")
                 st.download_button("📥 下载纯净版修复结果", out_fix.getvalue(), "Fixed_Submission_Clean.xlsx")
