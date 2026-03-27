@@ -44,18 +44,25 @@ class CouponProcessor:
 # --- 侧边栏 ---
 with st.sidebar:
     st.header("📂 核心文件上传")
-    # 通过动态 key 实现真正的清空
     rk = st.session_state.reset_key
+
     site_template = st.file_uploader("1. 空白模板 (底稿)", type=['xlsx'], key=f"tpl_{rk}")
     all_listing_file = st.file_uploader("2. Listing 报告", type=['txt', 'csv', 'xlsx'], key=f"list_{rk}")
     error_feedback_file = st.file_uploader("3. 亚马逊报错文件", type=['xlsx'], key=f"err_{rk}")
     
     st.divider()
+
     if st.button("🗑️ 清空所有上传", use_container_width=True, type="secondary"):
-        st.session_state.reset_key += 1  # 改变 Key 强制重置上传组件
+        st.session_state.reset_key += 1
         st.session_state.master_df = None
-        if "final_excel" in st.session_state: del st.session_state.final_excel
-        if "gen_file" in st.session_state: del st.session_state.gen_file
+
+        # 清空所有生成结果
+        for key in ["final_excel", "gen_file", "main_editor_v4"]:
+            if key in st.session_state:
+                del st.session_state[key]
+
+        st.toast("✅ 已清空所有上传内容", icon="🧹")
+        st.success("页面已重置")
         st.rerun()
 
 st.title("🎯 Cupshe Amazon Coupon 自动化管理系统")
@@ -87,106 +94,123 @@ with tab2:
     if not all_listing_file or not error_feedback_file or not site_template:
         st.info("💡 请在左侧上传【空白模板】、【Listing报告】和【报错文件】以开启修复功能。")
     else:
-        # 数据解析逻辑
+        # 数据解析
         if st.session_state.master_df is None:
-            with st.spinner("正在精准解析报错与价格数据..."):
-                # Listing 解析
+            with st.spinner("正在解析数据..."):
                 for enc in ['utf-8', 'utf-16', 'gbk', 'utf-8-sig']:
                     try:
                         all_listing_file.seek(0)
                         df_l = pd.read_csv(all_listing_file, sep='\t', encoding=enc) if all_listing_file.name.endswith('.txt') else pd.read_excel(all_listing_file)
                         df_l.columns = [c.lower().strip() for c in df_l.columns]; break
                     except: continue
-                # 报错文件解析
+
                 error_feedback_file.seek(0)
                 wb_err = openpyxl.load_workbook(error_feedback_file, data_only=True)
                 ws_err = wb_err.active
+
                 e_h = [ws_err.cell(row=7, column=c).value for c in range(1, ws_err.max_column + 1)]
                 a_idx = next((i for i, h in enumerate(e_h) if h and 'ASIN' in str(h)), 0)
                 d_idx = next((i for i, h in enumerate(e_h) if h and '折扣' in str(h) and '数值' in str(h)), 2)
-                
+
                 rows = []
                 for r in range(10, ws_err.max_row + 1):
                     if not any([ws_err.cell(row=r, column=c).value for c in range(1, ws_err.max_column+1)]): continue
                     comm = ws_err.cell(row=r, column=ws_err.max_column).comment.text if ws_err.cell(row=r, column=ws_err.max_column).comment else ""
                     err_map = CouponProcessor.parse_error_details(comm)
+
                     asin_str = str(ws_err.cell(row=r, column=a_idx+1).value)
                     for a in [a.strip() for a in asin_str.replace(',',';').split(';') if a.strip()]:
                         a_col = next((c for c in df_l.columns if 'asin' in c), None)
                         p_col = next((c for c in df_l.columns if 'price' in c or '价格' in c), None)
                         p_match = df_l[df_l[a_col] == a][p_col].values if a_col else []
                         orig_p = p_match[0] if len(p_match) > 0 else 0
+
                         info = err_map.get(a, {})
                         curr_d = ws_err.cell(row=r, column=d_idx+1).value or 0.05
                         suggested = curr_d
+
                         if info.get('req_price') and orig_p:
                             needed = math.ceil(((float(orig_p) - float(info['req_price'])) / float(orig_p)) * 100)
                             suggested = needed / 100 if float(curr_d) < 1 else max(needed, 5)
-                        rows.append({"决策": info.get('default_decision', "保留"), "ASIN": a, "状态": "❌ 批注报错" if a in err_map else "✅ 正常",
-                                    "原因": info.get('reason', "-"), "要求净价格": info.get('req_price', "-"), "拟提报折扣": suggested, "Listing原价": orig_p, "原始行号": r})
+
+                        rows.append({
+                            "决策": info.get('default_decision', "保留"),
+                            "ASIN": a,
+                            "状态": "❌ 批注报错" if a in err_map else "✅ 正常",
+                            "原因": info.get('reason', "-"),
+                            "要求净价格": info.get('req_price', "-"),
+                            "拟提报折扣": suggested,
+                            "Listing原价": orig_p,
+                            "原始行号": r
+                        })
+
                 st.session_state.master_df = pd.DataFrame(rows)
 
-        # 显示决策表格
+        # 表格
         st.subheader("🛠️ 修复决策台")
         edited_df = st.data_editor(
             st.session_state.master_df,
             column_config={"决策": st.column_config.SelectboxColumn("决策", options=["保留", "剔除"]), "原始行号": None},
             disabled=['ASIN', '状态', '原因', '要求净价格', 'Listing原价'],
-            hide_index=True, use_container_width=True, key="main_editor_v4"
+            hide_index=True,
+            use_container_width=True,
+            key="main_editor_v4"
         )
         st.session_state.master_df = edited_df
 
         st.divider()
-        
-        # --- 核心生成区域 (彻底修复不显示和无反应问题) ---
+
+        # ✅ 强制显示生成区（核心修复）
         st.subheader("📦 纯净导出区")
-        
+
         col_btn, col_msg = st.columns([1, 2])
-        
-        # 点击生成
-        if col_btn.button("🚀 执行生成 (点击后请观察右侧提示)", use_container_width=True, type="primary"):
+
+        if col_btn.button("🚀 执行生成", use_container_width=True, type="primary"):
+            msg_placeholder = col_msg.empty()
+
             try:
-                msg_placeholder = col_msg.empty()
-                msg_placeholder.info("⏳ 正在构建文件，请稍候...")
-                
+                msg_placeholder.warning("⏳ 正在生成，请稍候...")
+
                 site_template.seek(0)
                 wb_final = openpyxl.load_workbook(site_template)
                 ws_final = wb_final.active
+
                 error_feedback_file.seek(0)
                 wb_err_ref = openpyxl.load_workbook(error_feedback_file, data_only=True)
                 ws_err_ref = wb_err_ref.active
-                
+
                 f_h = [ws_final.cell(row=7, column=c).value for c in range(1, ws_final.max_column + 1)]
                 f_a_idx = next((i for i, h in enumerate(f_h, 1) if h and 'ASIN' in str(h)), 1)
                 f_d_idx = next((i for i, h in enumerate(f_h, 1) if h and '折扣' in str(h) and '数值' in str(h)), 3)
-                
+
                 final_keep = st.session_state.master_df[st.session_state.master_df['决策'] == "保留"]
+
                 curr_row = 10
                 for (orig_l, disc), group in final_keep.groupby(['原始行号', '拟提报折扣']):
                     for c_idx in range(1, len(f_h) + 1):
                         val = ws_err_ref.cell(row=orig_l, column=c_idx).value
-                        target = ws_final.cell(row=curr_row, column=c_idx, value=val)
-                        ref_s = ws_final.cell(row=9, column=c_idx)
-                        if ref_s.has_style:
-                            target.font, target.border = copy(ref_s.font), copy(ref_s.border)
-                            target.fill, target.alignment = copy(ref_s.fill), copy(ref_s.alignment)
+                        ws_final.cell(row=curr_row, column=c_idx, value=val)
+
                     ws_final.cell(row=curr_row, column=f_a_idx).value = ";".join(group['ASIN'].tolist())
                     ws_final.cell(row=curr_row, column=f_d_idx).value = disc
                     curr_row += 1
-                
+
                 out_fix = io.BytesIO()
                 wb_final.save(out_fix)
-                st.session_state.final_excel = out_fix.getvalue()
-                msg_placeholder.success("✅ 文件生成完毕！请点击下方按钮下载。")
-            except Exception as e:
-                col_msg.error(f"❌ 生成失败: {str(e)}")
 
-        # 下载按钮
+                st.session_state.final_excel = out_fix.getvalue()
+
+                msg_placeholder.success("✅ 已生成成功，下面可以下载")
+
+            except Exception as e:
+                msg_placeholder.error(f"❌ 生成失败: {str(e)}")
+
+        # 下载按钮（稳定显示）
         if "final_excel" in st.session_state:
             st.download_button(
-                label="📥 点击下载修复后的纯净 Excel",
+                label="📥 下载修复后的Excel",
                 data=st.session_state.final_excel,
-                file_name=f"Fixed_Coupon_{datetime.now().strftime('%H%M%S')}.xlsx",
+                file_name=f"Fixed_{datetime.now().strftime('%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
