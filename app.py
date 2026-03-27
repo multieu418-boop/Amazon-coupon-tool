@@ -23,11 +23,13 @@ class CouponProcessor:
     def parse_error_details(comment_text):
         error_map = {}
         if not comment_text: return error_map
+        # 解析批注中的 ASIN 和 报错详情
         blocks = re.split(r'([A-Z0-9]{10})\n', str(comment_text))
         if len(blocks) > 1:
             for i in range(1, len(blocks), 2):
                 asin = blocks[i].strip()
                 content = blocks[i+1]
+                # 提取要求的价格
                 req_p_match = re.search(r'(?:要求的净价格|当前净价格|要求的最高商品价格)：[^\d]*([\d\.]+)', content)
                 req_p = float(req_p_match.group(1)) if req_p_match else None
                 reason_part = re.split(r'(?:要求的净价格|当前净价格|要求的最高商品价格)', content)[0]
@@ -52,8 +54,9 @@ with st.sidebar:
     st.divider()
     if error_feedback_file and all_listing_file:
         st.header("⚙️ 修复筛选配置")
-        status_sel = st.multiselect("ASIN 状态筛选", ["✅ 正常", "❌ 批注报错"], default=["✅ 正常", "❌ 批注报错"])
-        reason_kw = st.text_input("报错原因关键词过滤")
+        # 需求2修复：确保这里的 key 能被下方 mask 正确引用
+        status_sel = st.multiselect("ASIN 状态筛选", ["✅ 正常", "❌ 批注报错"], default=["✅ 正常", "❌ 批注报错"], key="filter_status")
+        reason_kw = st.text_input("报错原因关键词过滤", key="filter_reason")
 
     if st.button("🔄 清空所有上传"):
         st.session_state.clear()
@@ -90,7 +93,7 @@ with tab1:
                 target_col = col1 if i % 2 == 0 else col2
                 h_str = str(h)
                 if "ASIN" in h_str.upper():
-                    user_data[h] = target_col.text_area(f"{h}")
+                    user_data[h] = target_col.text_area(f"{h}", placeholder="粘贴 ASIN...")
                 elif any(k in h_str for k in CALENDAR_KEYWORDS):
                     user_data[h] = target_col.date_input(f"{h}", value=datetime.now(), key=f"d_g_{i}").strftime("%Y-%m-%d")
                 elif any(k in h_str for k in MANUAL_KEYWORDS) or ("折扣" in h_str and "类型" not in h_str):
@@ -115,13 +118,12 @@ with tab1:
 # --- 第二阶段：报错修复 ---
 with tab2:
     if not all_listing_file or not error_feedback_file:
-        st.warning("👈 请在左侧上传【Listing 报告】和【报错文件】。")
+        st.warning("👈 请在左侧上传【All Listing 报告】和【亚马逊返回的报错文件】。")
     elif not site_template:
         st.error("⚠️ 请在左侧【第一阶段】处上传站点空白模板，作为修复后的导出底稿。")
     else:
         if 'master_df' not in st.session_state:
             with st.spinner("深度比对数据中..."):
-                # 1. 读取 Listing
                 for enc in ['utf-8', 'utf-16', 'gbk', 'utf-8-sig']:
                     try:
                         all_listing_file.seek(0)
@@ -130,7 +132,6 @@ with tab2:
                         break
                     except: continue
                 
-                # 2. 读取报错文件
                 error_feedback_file.seek(0)
                 wb_err = openpyxl.load_workbook(error_feedback_file, data_only=True)
                 ws_err = wb_err.active
@@ -166,56 +167,70 @@ with tab2:
                             needed = math.ceil(((float(orig_p) - float(info.get('req_price'))) / float(orig_p)) * 100)
                             suggested = needed / 100 if float(curr_d or 0) < 1 else max(needed, 5)
 
+                        # 需求1修复：在这里加入 "要求净价格" 的提取结果
                         rows.append({
-                            "决策": info.get('default_decision', "保留"), "ASIN": a, 
+                            "决策": info.get('default_decision', "保留"), 
+                            "ASIN": a, 
                             "状态": "❌ 批注报错" if a in err_map else "✅ 正常",
-                            "详细报错原因": info.get('reason', "-"), "拟提报折扣": suggested,
-                            "Listing原价": orig_p, "原始行号": r_idx
+                            "详细报错原因": info.get('reason', "-"), 
+                            "要求净价格": info.get('req_price', "-"),
+                            "拟提报折扣": suggested,
+                            "Listing原价": orig_p, 
+                            "原始行号": r_idx
                         })
                 st.session_state.master_df = pd.DataFrame(rows)
 
         if st.session_state.get('master_df') is not None:
-            # 决策台展示 (省略筛选逻辑代码同前...)
-            df_show = st.session_state.master_df
+            # 需求2修复：在这里显式地根据侧边栏筛选器 status_sel 进行过滤
+            mask = st.session_state.master_df['状态'].isin(status_sel)
+            if reason_kw:
+                mask = mask & st.session_state.master_df['详细报错原因'].str.contains(reason_kw, case=False)
+            
+            df_show = st.session_state.master_df[mask].copy()
+            
             st.subheader("🛠️ 修复决策台")
-            edited = st.data_editor(df_show, hide_index=True, use_container_width=True, key="fix_edit")
+            edited = st.data_editor(
+                df_show,
+                column_config={"决策": st.column_config.SelectboxColumn("决策", options=["保留", "剔除"]), "原始行号": None},
+                disabled=['ASIN', '状态', '详细报错原因', '要求净价格', 'Listing原价'],
+                hide_index=True, use_container_width=True, key="fix_edit"
+            )
+
+            # 同步编辑结果回 master_df
+            if not edited.equals(df_show):
+                for idx in edited.index:
+                    st.session_state.master_df.loc[idx, '决策'] = edited.loc[idx, '决策']
+                    st.session_state.master_df.loc[idx, '拟提报折扣'] = edited.loc[idx, '拟提报折扣']
+                st.rerun()
 
             if st.button("🚀 生成纯净修复版 Excel", use_container_width=True):
-                # --- 关键修改：使用第一阶段上传的空白模板作为底稿 ---
                 site_template.seek(0)
                 wb_final = openpyxl.load_workbook(site_template)
                 ws_final = wb_final.active
                 
-                # 读取报错文件用于提取其他原始信息 (如预算、名称等)
                 error_feedback_file.seek(0)
                 wb_err_ref = openpyxl.load_workbook(error_feedback_file, data_only=True)
                 ws_err_ref = wb_err_ref.active
                 
-                # 获取标题索引 (底稿)
                 final_headers = [ws_final.cell(row=7, column=c).value for c in range(1, ws_final.max_column + 1)]
                 a_idx = next((i for i, h in enumerate(final_headers, 1) if h and 'ASIN' in str(h)), 1)
                 d_idx = next((i for i, h in enumerate(final_headers, 1) if h and '折扣' in str(h) and '数值' in str(h)), 3)
 
-                final_keep = edited[edited['决策'] == "保留"]
+                # 只处理决策为保留的 ASIN
+                final_keep = st.session_state.master_df[st.session_state.master_df['决策'] == "保留"]
                 curr_row = 10
                 
-                # 按原始行号分组，确保一行里的多个 ASIN 还是在一行
                 for (orig_l, disc), group in final_keep.groupby(['原始行号', '拟提报折扣']):
-                    # 1. 拷贝原始行中除 ASIN 和 折扣外的所有基础数据
                     for c_idx in range(1, len(final_headers) + 1):
-                        # 从报错文件的对应行读取原始值 (A-L列等)
                         orig_val = ws_err_ref.cell(row=orig_l, column=c_idx).value
                         target_cell = ws_final.cell(row=curr_row, column=c_idx, value=orig_val)
                         
-                        # 2. 样式对齐 (从底稿的第9行参考行克隆样式)
+                        # 样式克隆
                         ref_style_cell = ws_final.cell(row=9, column=c_idx)
                         if ref_style_cell.has_style:
-                            target_cell.font = copy(ref_style_cell.font)
-                            target_cell.border = copy(ref_style_cell.border)
-                            target_cell.fill = copy(ref_style_cell.fill)
-                            target_cell.alignment = copy(ref_style_cell.alignment)
+                            target_cell.font, target_cell.border, target_cell.fill, target_cell.alignment = \
+                                copy(ref_style_cell.font), copy(ref_style_cell.border), copy(ref_style_cell.fill), copy(ref_style_cell.alignment)
                     
-                    # 3. 覆盖写入修复后的 ASIN 串和拟提报折扣
                     ws_final.cell(row=curr_row, column=a_idx).value = ";".join(group['ASIN'].tolist())
                     ws_final.cell(row=curr_row, column=d_idx).value = disc
                     curr_row += 1
