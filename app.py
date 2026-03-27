@@ -9,7 +9,7 @@ import math
 from datetime import datetime
 
 # --- 页面基础配置 ---
-st.set_page_config(page_title="Cupshe Amazon 工具箱", layout="wide")
+st.set_page_config(page_title="Cupshe Amazon Coupon 工具", layout="wide")
 
 class CouponProcessor:
     @staticmethod
@@ -63,25 +63,28 @@ with tab1:
         ws_gen = wb_gen.active
         headers = [cell.value for cell in ws_gen[7] if cell.value]
         
-        # --- 核心修改：定义强制手动输入和日历的名单 ---
-        # 只要标题包含这些字眼，绝对不使用下拉框
-        FORCE_TEXT_INPUT = ["折扣", "数值", "金额", "满减", "名称", "预算"]
-        FORCE_CALENDAR = ["日期"]
+        # --- 核心逻辑：精准区分手动输入、日历、下拉选择 ---
+        # 1. 强制手动输入的关键字（排除了“类型”二字以避免误杀下拉框）
+        MANUAL_KEYWORDS = ["数值", "金额", "名称", "预算", "满减金额"]
+        # 2. 强制日历选择的关键字
+        CALENDAR_KEYWORDS = ["日期"]
         
         dropdown_options = {}
         for i in range(1, len(headers) + 1):
             h_text = str(headers[i-1])
             
-            # 只有当标题不属于“强制手动”或“强制日历”时，才去识别模板里的下拉值
-            is_manual = any(k in h_text for k in FORCE_TEXT_INPUT)
-            is_date = any(k in h_text for k in FORCE_CALENDAR)
+            # 判断逻辑：
+            # 如果标题包含“日期” -> 日历
+            # 如果标题包含手动关键字（数值、名称等） -> 手动输入
+            # 否则，如果模板第8/9行有内容 -> 下拉选项（例如：折扣类型）
+            is_date = any(k in h_text for k in CALENDAR_KEYWORDS)
+            is_manual = any(k in h_text for k in MANUAL_KEYWORDS) or ( "折扣" in h_text and "类型" not in h_text and "选择" not in h_text)
             
-            if not is_manual and not is_date:
+            if not is_date and not is_manual:
                 val8 = ws_gen.cell(row=8, column=i).value
                 val9 = ws_gen.cell(row=9, column=i).value
                 if val8 or val9:
                     opts = list(dict.fromkeys(filter(None, [str(val8), str(val9)])))
-                    # 如果选项超过1个，才定义为下拉
                     if len(opts) >= 1:
                         dropdown_options[h_text] = opts
 
@@ -93,25 +96,25 @@ with tab1:
                 target_col = col1 if i % 2 == 0 else col2
                 h_str = str(h)
                 
-                # 1. ASIN 列表 (大文本框)
+                # A. ASIN 列表 (大文本框)
                 if "ASIN" in h_str.upper():
                     raw_asin = target_col.text_area(f"{h}", placeholder="粘贴 ASIN...")
                     user_data[h] = CouponProcessor.clean_asin_input(raw_asin)
                 
-                # 2. 强制日历选择器
-                elif any(k in h_str for k in FORCE_CALENDAR):
+                # B. 日历选择器 (日期类)
+                elif any(k in h_str for k in CALENDAR_KEYWORDS):
                     picked_date = target_col.date_input(f"{h}", value=datetime.now(), key=f"date_p_{i}")
                     user_data[h] = picked_date.strftime("%Y-%m-%d")
                 
-                # 3. 强制手动输入框 (解决你的核心痛点)
-                elif any(k in h_str for k in FORCE_TEXT_INPUT):
-                    user_data[h] = target_col.text_input(f"{h}", placeholder="在此手动输入数值或内容...")
+                # C. 强制手动输入框 (折扣数值、金额、预算等)
+                elif any(k in h_str for k in MANUAL_KEYWORDS) or ("折扣" in h_str and "类型" not in h_str):
+                    user_data[h] = target_col.text_input(f"{h}", placeholder="请手动输入...")
                 
-                # 4. 剩余的自动下拉项
+                # D. 下拉选项 (折扣类型、目标买家等)
                 elif h_str in dropdown_options:
                     user_data[h] = target_col.selectbox(f"{h}", options=dropdown_options[h_str])
                 
-                # 5. 默认手动输入
+                # E. 默认手动输入
                 else:
                     user_data[h] = target_col.text_input(f"{h}")
             
@@ -128,14 +131,13 @@ with tab1:
                 wb_gen.save(out_gen)
                 st.download_button("📥 下载生成的文件", out_gen.getvalue(), "New_Coupon.xlsx")
 
-# --- 第二阶段逻辑保持不变 ---
+# --- 第二阶段逻辑 ---
 with tab2:
     if not all_listing_file or not template_file:
         st.info("💡 请上传数据源。")
     else:
-        # (此处省略第二阶段重复代码，功能已完整包含在下方全量代码中)
         if 'repair_data' not in st.session_state:
-            with st.spinner("数据交叉比对中..."):
+            with st.spinner("数据处理中..."):
                 for enc in ['utf-8', 'utf-16', 'gbk', 'utf-8-sig']:
                     try:
                         all_listing_file.seek(0)
