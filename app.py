@@ -23,15 +23,14 @@ class CouponProcessor:
     def parse_error_details(comment_text):
         error_map = {}
         if not comment_text: return error_map
-        # 解析批注中的 ASIN 和 报错详情
+        # 将整个批注按 ASIN 块切分
         blocks = re.split(r'([A-Z0-9]{10})\n', str(comment_text))
         if len(blocks) > 1:
             for i in range(1, len(blocks), 2):
                 asin = blocks[i].strip()
                 content = blocks[i+1]
                 
-                # 【精准提取：仅维护此处正则逻辑】
-                # 严格匹配“要求的”数值，避免抓取到“当前净价格”
+                # 【精准提取】严格匹配“要求的”数值，忽略“当前”数值
                 req_p = None
                 req_match = re.search(r'要求的(?:净价格|最高商品价格)：[^\d]*([\d\.]+)', content)
                 if not req_match:
@@ -130,6 +129,7 @@ with tab2:
     elif not site_template:
         st.error("⚠️ 请在左侧【第一阶段】处上传站点空白模板，作为修复后的导出底稿。")
     else:
+        # 数据加载逻辑
         if 'master_df' not in st.session_state:
             with st.spinner("深度比对数据中..."):
                 for enc in ['utf-8', 'utf-16', 'gbk', 'utf-8-sig']:
@@ -178,6 +178,7 @@ with tab2:
                         })
                 st.session_state.master_df = pd.DataFrame(rows)
 
+        # 决策与导出区域
         if st.session_state.get('master_df') is not None:
             mask = st.session_state.master_df['状态'].isin(status_sel)
             if reason_kw:
@@ -197,6 +198,7 @@ with tab2:
                 hide_index=True, use_container_width=True, key="fix_edit"
             )
 
+            # 更新数据
             if not edited.equals(df_show):
                 for idx in edited.index:
                     st.session_state.master_df.loc[idx, '决策'] = edited.loc[idx, '决策']
@@ -204,42 +206,47 @@ with tab2:
                 st.rerun()
 
             st.divider()
-            # 【维护修改：确保生成按钮和下载按钮逻辑独立】
-            if st.button("🚀 生成纯净修复版 Excel", use_container_width=True):
-                site_template.seek(0)
-                wb_final = openpyxl.load_workbook(site_template)
-                ws_final = wb_final.active
-                error_feedback_file.seek(0)
-                wb_err_ref = openpyxl.load_workbook(error_feedback_file, data_only=True)
-                ws_err_ref = wb_err_ref.active
-                f_headers = [ws_final.cell(row=7, column=c).value for c in range(1, ws_final.max_column + 1)]
-                a_idx = next((i for i, h in enumerate(f_headers, 1) if h and 'ASIN' in str(h)), 1)
-                d_idx = next((i for i, h in enumerate(f_headers, 1) if h and '折扣' in str(h) and '数值' in str(h)), 3)
-                final_keep = st.session_state.master_df[st.session_state.master_df['决策'] == "保留"]
-                curr_row = 10
-                for (orig_l, disc), group in final_keep.groupby(['原始行号', '拟提报折扣']):
-                    for c_idx in range(1, len(f_headers) + 1):
-                        orig_val = ws_err_ref.cell(row=orig_l, column=c_idx).value
-                        target_cell = ws_final.cell(row=curr_row, column=c_idx, value=orig_val)
-                        ref_style = ws_final.cell(row=9, column=c_idx)
-                        if ref_style.has_style:
-                            target_cell.font, target_cell.border, target_cell.fill, target_cell.alignment = \
-                                copy(ref_style.font), copy(ref_style.border), copy(ref_style.fill), copy(ref_style.alignment)
-                    ws_final.cell(row=curr_row, column=a_idx).value = ";".join(group['ASIN'].tolist())
-                    ws_final.cell(row=curr_row, column=d_idx).value = disc
-                    curr_row += 1
-                out_fix = BytesIO()
-                wb_final.save(out_fix)
-                # 存入 session_state 确保下载按钮能抓取到
-                st.session_state.fix_ready_data = out_fix.getvalue()
-                st.success("✅ 文件已成功生成！")
+            
+            # --- 导出功能区：确保按钮常驻且逻辑独立 ---
+            col_btn1, col_btn2 = st.columns([1, 1])
+            
+            with col_btn1:
+                if st.button("🚀 生成纯净修复版 Excel", use_container_width=True):
+                    site_template.seek(0)
+                    wb_final = openpyxl.load_workbook(site_template)
+                    ws_final = wb_final.active
+                    error_feedback_file.seek(0)
+                    wb_err_ref = openpyxl.load_workbook(error_feedback_file, data_only=True)
+                    ws_err_ref = wb_err_ref.active
+                    f_headers = [ws_final.cell(row=7, column=c).value for c in range(1, ws_final.max_column + 1)]
+                    a_idx = next((i for i, h in enumerate(f_headers, 1) if h and 'ASIN' in str(h)), 1)
+                    d_idx = next((i for i, h in enumerate(f_headers, 1) if h and '折扣' in str(h) and '数值' in str(h)), 3)
+                    
+                    final_keep = st.session_state.master_df[st.session_state.master_df['决策'] == "保留"]
+                    curr_row = 10
+                    for (orig_l, disc), group in final_keep.groupby(['原始行号', '拟提报折扣']):
+                        for c_idx in range(1, len(f_headers) + 1):
+                            orig_val = ws_err_ref.cell(row=orig_l, column=c_idx).value
+                            target_cell = ws_final.cell(row=curr_row, column=c_idx, value=orig_val)
+                            ref_style = ws_final.cell(row=9, column=c_idx)
+                            if ref_style.has_style:
+                                target_cell.font, target_cell.border, target_cell.fill, target_cell.alignment = \
+                                    copy(ref_style.font), copy(ref_style.border), copy(ref_style.fill), copy(ref_style.alignment)
+                        ws_final.cell(row=curr_row, column=a_idx).value = ";".join(group['ASIN'].tolist())
+                        ws_final.cell(row=curr_row, column=d_idx).value = disc
+                        curr_row += 1
+                    
+                    out_fix = BytesIO()
+                    wb_final.save(out_fix)
+                    st.session_state.tab2_file = out_fix.getvalue()
+                    st.success("✅ 修复文件已生成！")
 
-            # 只要生成过数据，下载按钮就一直可见
-            if "fix_ready_data" in st.session_state:
-                st.download_button(
-                    label="📥 点击下载：纯净版修复结果",
-                    data=st.session_state.fix_ready_data,
-                    file_name="Fixed_Submission_Clean.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+            with col_btn2:
+                if "tab2_file" in st.session_state:
+                    st.download_button(
+                        label="📥 下载纯净版修复结果",
+                        data=st.session_state.tab2_file,
+                        file_name="Fixed_Submission_Clean.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
