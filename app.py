@@ -29,7 +29,7 @@ class CouponProcessor:
             for i in range(1, len(blocks), 2):
                 asin = blocks[i].strip()
                 content = blocks[i+1]
-                # 提取要求的价格
+                # 提取要求的价格（兼容多种描述）
                 req_p_match = re.search(r'(?:要求的净价格|当前净价格|要求的最高商品价格)：[^\d]*([\d\.]+)', content)
                 req_p = float(req_p_match.group(1)) if req_p_match else None
                 reason_part = re.split(r'(?:要求的净价格|当前净价格|要求的最高商品价格)', content)[0]
@@ -54,9 +54,8 @@ with st.sidebar:
     st.divider()
     if error_feedback_file and all_listing_file:
         st.header("⚙️ 修复筛选配置")
-        # 需求2修复：确保这里的 key 能被下方 mask 正确引用
-        status_sel = st.multiselect("ASIN 状态筛选", ["✅ 正常", "❌ 批注报错"], default=["✅ 正常", "❌ 批注报错"], key="filter_status")
-        reason_kw = st.text_input("报错原因关键词过滤", key="filter_reason")
+        status_sel = st.multiselect("ASIN 状态筛选", ["✅ 正常", "❌ 批注报错"], default=["✅ 正常", "❌ 批注报错"])
+        reason_kw = st.text_input("报错原因关键词过滤")
 
     if st.button("🔄 清空所有上传"):
         st.session_state.clear()
@@ -149,6 +148,7 @@ with tab2:
                     row_vals = [ws_err.cell(row=r_idx, column=c).value for c in range(1, ws_err.max_column + 1)]
                     if not any(row_vals): continue
                     
+                    # 定位 M/N 列或最后一列（带批注的那一列）
                     comment_cell = ws_err.cell(row=r_idx, column=ws_err.max_column)
                     comment_text = comment_cell.comment.text if comment_cell and comment_cell.comment else ""
                     
@@ -167,13 +167,13 @@ with tab2:
                             needed = math.ceil(((float(orig_p) - float(info.get('req_price'))) / float(orig_p)) * 100)
                             suggested = needed / 100 if float(curr_d or 0) < 1 else max(needed, 5)
 
-                        # 需求1修复：在这里加入 "要求净价格" 的提取结果
+                        # 【修复1】确保 req_price 被填入 rows 列表
                         rows.append({
                             "决策": info.get('default_decision', "保留"), 
                             "ASIN": a, 
                             "状态": "❌ 批注报错" if a in err_map else "✅ 正常",
                             "详细报错原因": info.get('reason', "-"), 
-                            "要求净价格": info.get('req_price', "-"),
+                            "要求净价格": info.get('req_price', "-"), 
                             "拟提报折扣": suggested,
                             "Listing原价": orig_p, 
                             "原始行号": r_idx
@@ -181,7 +181,7 @@ with tab2:
                 st.session_state.master_df = pd.DataFrame(rows)
 
         if st.session_state.get('master_df') is not None:
-            # 需求2修复：在这里显式地根据侧边栏筛选器 status_sel 进行过滤
+            # 【修复2】联动状态筛选逻辑
             mask = st.session_state.master_df['状态'].isin(status_sel)
             if reason_kw:
                 mask = mask & st.session_state.master_df['详细报错原因'].str.contains(reason_kw, case=False)
@@ -191,12 +191,16 @@ with tab2:
             st.subheader("🛠️ 修复决策台")
             edited = st.data_editor(
                 df_show,
-                column_config={"决策": st.column_config.SelectboxColumn("决策", options=["保留", "剔除"]), "原始行号": None},
+                column_config={
+                    "决策": st.column_config.SelectboxColumn("决策", options=["保留", "剔除"]),
+                    "要求净价格": st.column_config.NumberColumn("要求净价格", format="%.2f"),
+                    "原始行号": None
+                },
                 disabled=['ASIN', '状态', '详细报错原因', '要求净价格', 'Listing原价'],
                 hide_index=True, use_container_width=True, key="fix_edit"
             )
 
-            # 同步编辑结果回 master_df
+            # 同步编辑结果
             if not edited.equals(df_show):
                 for idx in edited.index:
                     st.session_state.master_df.loc[idx, '决策'] = edited.loc[idx, '决策']
@@ -204,10 +208,12 @@ with tab2:
                 st.rerun()
 
             if st.button("🚀 生成纯净修复版 Excel", use_container_width=True):
+                # 使用第一阶段底稿
                 site_template.seek(0)
                 wb_final = openpyxl.load_workbook(site_template)
                 ws_final = wb_final.active
                 
+                # 参考报错文件提取非 ASIN 数据
                 error_feedback_file.seek(0)
                 wb_err_ref = openpyxl.load_workbook(error_feedback_file, data_only=True)
                 ws_err_ref = wb_err_ref.active
@@ -216,7 +222,6 @@ with tab2:
                 a_idx = next((i for i, h in enumerate(final_headers, 1) if h and 'ASIN' in str(h)), 1)
                 d_idx = next((i for i, h in enumerate(final_headers, 1) if h and '折扣' in str(h) and '数值' in str(h)), 3)
 
-                # 只处理决策为保留的 ASIN
                 final_keep = st.session_state.master_df[st.session_state.master_df['决策'] == "保留"]
                 curr_row = 10
                 
@@ -225,7 +230,6 @@ with tab2:
                         orig_val = ws_err_ref.cell(row=orig_l, column=c_idx).value
                         target_cell = ws_final.cell(row=curr_row, column=c_idx, value=orig_val)
                         
-                        # 样式克隆
                         ref_style_cell = ws_final.cell(row=9, column=c_idx)
                         if ref_style_cell.has_style:
                             target_cell.font, target_cell.border, target_cell.fill, target_cell.alignment = \
@@ -237,4 +241,5 @@ with tab2:
                 
                 out_fix = BytesIO()
                 wb_final.save(out_fix)
+                st.success("✅ 文件已成功基于空白底稿生成。")
                 st.download_button("📥 下载纯净版修复结果", out_fix.getvalue(), "Fixed_Submission_Clean.xlsx")
