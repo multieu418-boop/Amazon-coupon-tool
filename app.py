@@ -6,6 +6,7 @@ from copy import copy
 import re
 from io import BytesIO
 import math
+from datetime import datetime
 
 # --- 页面基础配置 ---
 st.set_page_config(page_title="Cupshe Coupon 综合工具", layout="wide")
@@ -42,7 +43,7 @@ class CouponProcessor:
 # --- 侧边栏：文件上传 ---
 with st.sidebar:
     st.header("📂 核心数据源")
-    all_listing_file = st.file_uploader("1. All Listing 报告 (txt/csv)", type=['txt', 'csv', 'xlsx'])
+    all_listing_file = st.file_uploader("1. All Listing 报告 (txt/csv/xlsx)", type=['txt', 'csv', 'xlsx'])
     template_file = st.file_uploader("2. Coupon 模板 (xlsx)", type=['xlsx'])
     st.divider()
     if st.button("🔄 重置所有会话"):
@@ -62,13 +63,15 @@ with tab1:
         ws_gen = wb_gen.active
         headers = [cell.value for cell in ws_gen[7] if cell.value]
         
-        # 自动提取下拉选项 (排除用户指定的需手动输入的项)
-        manual_fields = ["折扣数值", "金额", "名称", "预算", "日期"]
+        # 定义需要特殊处理的字段类型
+        input_fields = ["折扣数值", "金额", "名称", "预算"]
+        date_fields = ["开始日期", "结束日期"]
+        
         dropdown_options = {}
         for i in range(1, len(headers) + 1):
             h_text = str(headers[i-1])
-            # 如果标题不包含手动输入的关键字，则尝试提取下拉
-            if not any(k in h_text for k in manual_fields):
+            # 如果不是手动输入也不是日期字段，则尝试从第8/9行提取下拉选项
+            if not any(k in h_text for k in input_fields) and not any(k in h_text for k in date_fields):
                 val8 = ws_gen.cell(row=8, column=i).value
                 val9 = ws_gen.cell(row=9, column=i).value
                 if val8 or val9:
@@ -88,29 +91,32 @@ with tab1:
                     raw_asin = target_col.text_area(f"{h}", placeholder="粘贴 ASIN 列表...")
                     user_data[h] = CouponProcessor.clean_asin_input(raw_asin)
                 
-                # 2. 用户指定的【手动输入框】项
-                elif any(k in h_str for k in manual_fields):
+                # 2. 日期选择器 (日历模式)
+                elif any(k in h_str for k in date_fields):
+                    picked_date = target_col.date_input(f"{h}", value=datetime.now())
+                    user_data[h] = picked_date.strftime("%Y-%m-%d")
+                
+                # 3. 手动输入框项
+                elif any(k in h_str for k in input_fields):
                     user_data[h] = target_col.text_input(f"{h}")
                 
-                # 3. 模板自带的【下拉选择】项
+                # 4. 模板自带的下拉项
                 elif h_str in dropdown_options:
                     user_data[h] = target_col.selectbox(f"{h}", options=dropdown_options[h_str])
                 
-                # 4. 其他默认输入
+                # 5. 其他默认输入
                 else:
                     user_data[h] = target_col.text_input(f"{h}")
             
             if st.form_submit_button("🚀 生成并导出提报文件"):
                 target_row = 10
-                # 寻找空行并写入数据，同时克隆第9行样式
+                # 写入逻辑并克隆第9行样式
                 for col_idx, h in enumerate(headers, 1):
                     new_cell = ws_gen.cell(row=target_row, column=col_idx, value=user_data[h])
                     source_cell = ws_gen.cell(row=9, column=col_idx)
                     if source_cell.has_style:
-                        new_cell.font = copy(source_cell.font)
-                        new_cell.border = copy(source_cell.border)
-                        new_cell.fill = copy(source_cell.fill)
-                        new_cell.alignment = copy(source_cell.alignment)
+                        new_cell.font, new_cell.border, new_cell.fill, new_cell.alignment = \
+                            copy(source_cell.font), copy(source_cell.border), copy(source_cell.fill), copy(source_cell.alignment)
                 
                 out_gen = BytesIO()
                 wb_gen.save(out_gen)
@@ -119,14 +125,17 @@ with tab1:
 # --- 第二阶段逻辑 ---
 with tab2:
     if not all_listing_file or not template_file:
-        st.info("请确保左侧已上传数据源。")
+        st.info("请确保左侧已上传 All Listing 报告及带报错批注的模板。")
     else:
         if 'repair_data' not in st.session_state:
-            with st.spinner("正在解析报错信息..."):
+            with st.spinner("正在解析数据..."):
                 for enc in ['utf-8', 'utf-16', 'gbk', 'utf-8-sig']:
                     try:
                         all_listing_file.seek(0)
-                        df_l = pd.read_csv(all_listing_file, sep='\t', encoding=enc) if all_listing_file.name.endswith('.txt') else pd.read_excel(all_listing_file)
+                        if all_listing_file.name.endswith('.txt'):
+                            df_l = pd.read_csv(all_listing_file, sep='\t', encoding=enc)
+                        else:
+                            df_l = pd.read_excel(all_listing_file)
                         df_l.columns = [c.lower().strip() for c in df_l.columns]
                         break
                     except: continue
@@ -184,13 +193,15 @@ with tab2:
                 st.session_state.repair_data = edited_df
                 st.rerun()
 
-            if st.button("🚀 导出全行修复版 Excel", use_container_width=True):
+            if st.button("🚀 导出全行无损修复版 Excel", use_container_width=True):
                 template_file.seek(0)
                 wb_out = openpyxl.load_workbook(template_file)
                 ws_out = wb_out.active
+                
                 backup = {}
                 for r in edited_df['原始行号'].unique():
                     backup[r] = [ws_out.cell(row=r, column=c).value for c in range(1, ws_out.max_column + 1)]
+                
                 for r in range(10, ws_out.max_row + 1):
                     for c in range(1, ws_out.max_column + 1): ws_out.cell(row=r, column=c).value = None
 
@@ -209,10 +220,12 @@ with tab2:
                         if source_cell.has_style:
                             target_cell.font, target_cell.border, target_cell.fill, target_cell.number_format, target_cell.alignment = \
                                 copy(source_cell.font), copy(source_cell.border), copy(source_cell.fill), copy(source_cell.number_format), copy(source_cell.alignment)
+                    
                     ws_out.cell(row=curr_row, column=a_col_idx).value = ";".join(group['ASIN'].tolist())
                     ws_out.cell(row=curr_row, column=d_col_idx).value = disc
                     curr_row += 1
                 
                 out_repair = BytesIO()
                 wb_out.save(out_repair)
-                st.download_button("📥 下载修复文件", out_repair.getvalue(), "Coupon_Fixed_Full.xlsx")
+                st.success("修复文件生成成功！")
+                st.download_button("📥 下载修复后的 Excel", out_repair.getvalue(), "Coupon_Fixed_Final.xlsx")
