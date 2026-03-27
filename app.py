@@ -32,22 +32,15 @@ class CouponProcessor:
                 asin = blocks[i].strip()
                 content = blocks[i+1]
                 
-                # 【精准提取修复逻辑】
-                # 使用正则表达式专门匹配“要求的净价格”或“要求的最高商品价格”
-                # 显式排除掉“当前净价格”字样
+                # 【精准提取】严格匹配“要求的”数值，忽略“当前”数值
                 req_p = None
-                
-                # 规则 1：匹配中文“要求的净价格”或“要求的最高商品价格”
                 req_match = re.search(r'要求的(?:净价格|最高商品价格)：[^\d]*([\d\.]+)', content)
-                
-                # 规则 2：如果规则1没匹配到，匹配英文（兼容不同站点）
                 if not req_match:
                     req_match = re.search(r'(?:Maximum product price allowed|Required net price)：[^\d]*([\d\.]+)', content)
                 
                 if req_match:
                     req_p = float(req_match.group(1))
                 
-                # 提取报错原因，移除干扰数值部分
                 reason_part = re.split(r'(?:要求的|当前|Maximum|Required)', content)[0]
                 reason = reason_part.strip().replace('\n', ' ')
                 auto_exclude = "没有经验证的参考价" in reason
@@ -139,7 +132,7 @@ with tab2:
         st.error("⚠️ 请在左侧【第一阶段】处上传站点空白模板，作为修复后的导出底稿。")
     else:
         if 'master_df' not in st.session_state:
-            with st.spinner("精准匹配批注价格中..."):
+            with st.spinner("深度比对数据中..."):
                 for enc in ['utf-8', 'utf-16', 'gbk', 'utf-8-sig']:
                     try:
                         all_listing_file.seek(0)
@@ -188,8 +181,8 @@ with tab2:
                             "决策": info.get('default_decision', "保留"), 
                             "ASIN": a, 
                             "状态": "❌ 批注报错" if a in err_map else "✅ 正常",
-                            "要求净价格": req_p_val if req_p_val else "-",
                             "详细报错原因": info.get('reason', "-"), 
+                            "要求净价格": req_p_val if req_p_val else "-",
                             "拟提报折扣": suggested,
                             "Listing原价": orig_p, 
                             "原始行号": r_idx
@@ -223,6 +216,7 @@ with tab2:
                 st.rerun()
 
             st.divider()
+            # 导出逻辑：执行完 openpyxl 处理后，将结果存入 session_state
             if st.button("🚀 生成纯净修复版 Excel", use_container_width=True):
                 site_template.seek(0)
                 wb_final = openpyxl.load_workbook(site_template)
@@ -255,8 +249,15 @@ with tab2:
                 
                 out_fix = BytesIO()
                 wb_final.save(out_fix)
-                st.session_state.fix_file = out_fix.getvalue()
-                st.success("✅ 修复文件已准备就绪！")
+                st.session_state.fix_file_ready = out_fix.getvalue()
+                st.success("✅ 修复文件已生成！请点击下方按钮下载。")
 
-            if st.session_state.get('fix_file'):
-                st.download_button("📥 点击下载：纯净版修复结果", st.session_state.fix_file, "Fixed_Submission_Clean.xlsx", use_container_width=True)
+            # 关键修复：下载按钮独立于生成按钮之外，确保一旦生成成功就一直显示
+            if "fix_file_ready" in st.session_state:
+                st.download_button(
+                    label="📥 点击下载：纯净版修复结果",
+                    data=st.session_state.fix_file_ready,
+                    file_name="Fixed_Submission_Clean.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
