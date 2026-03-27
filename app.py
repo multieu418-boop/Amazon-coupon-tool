@@ -63,20 +63,13 @@ with tab1:
         ws_gen = wb_gen.active
         headers = [cell.value for cell in ws_gen[7] if cell.value]
         
-        # --- 核心逻辑：精准区分手动输入、日历、下拉选择 ---
-        # 1. 强制手动输入的关键字（排除了“类型”二字以避免误杀下拉框）
+        # 精准区分逻辑
         MANUAL_KEYWORDS = ["数值", "金额", "名称", "预算", "满减金额"]
-        # 2. 强制日历选择的关键字
         CALENDAR_KEYWORDS = ["日期"]
         
         dropdown_options = {}
         for i in range(1, len(headers) + 1):
             h_text = str(headers[i-1])
-            
-            # 判断逻辑：
-            # 如果标题包含“日期” -> 日历
-            # 如果标题包含手动关键字（数值、名称等） -> 手动输入
-            # 否则，如果模板第8/9行有内容 -> 下拉选项（例如：折扣类型）
             is_date = any(k in h_text for k in CALENDAR_KEYWORDS)
             is_manual = any(k in h_text for k in MANUAL_KEYWORDS) or ( "折扣" in h_text and "类型" not in h_text and "选择" not in h_text)
             
@@ -89,6 +82,8 @@ with tab1:
                         dropdown_options[h_text] = opts
 
         st.subheader("📝 录入提报需求")
+        
+        # 创建表单
         with st.form("gen_form"):
             user_data = {}
             col1, col2 = st.columns(2)
@@ -96,29 +91,23 @@ with tab1:
                 target_col = col1 if i % 2 == 0 else col2
                 h_str = str(h)
                 
-                # A. ASIN 列表 (大文本框)
                 if "ASIN" in h_str.upper():
                     raw_asin = target_col.text_area(f"{h}", placeholder="粘贴 ASIN...")
                     user_data[h] = CouponProcessor.clean_asin_input(raw_asin)
-                
-                # B. 日历选择器 (日期类)
                 elif any(k in h_str for k in CALENDAR_KEYWORDS):
                     picked_date = target_col.date_input(f"{h}", value=datetime.now(), key=f"date_p_{i}")
                     user_data[h] = picked_date.strftime("%Y-%m-%d")
-                
-                # C. 强制手动输入框 (折扣数值、金额、预算等)
                 elif any(k in h_str for k in MANUAL_KEYWORDS) or ("折扣" in h_str and "类型" not in h_str):
                     user_data[h] = target_col.text_input(f"{h}", placeholder="请手动输入...")
-                
-                # D. 下拉选项 (折扣类型、目标买家等)
                 elif h_str in dropdown_options:
                     user_data[h] = target_col.selectbox(f"{h}", options=dropdown_options[h_str])
-                
-                # E. 默认手动输入
                 else:
                     user_data[h] = target_col.text_input(f"{h}")
             
-            if st.form_submit_button("🚀 生成并导出文件"):
+            # 表单内只放提交按钮
+            submitted = st.form_submit_button("🚀 生成提报文件")
+            
+            if submitted:
                 target_row = 10
                 for col_idx, h in enumerate(headers, 1):
                     new_cell = ws_gen.cell(row=target_row, column=col_idx, value=user_data[h])
@@ -129,7 +118,20 @@ with tab1:
                 
                 out_gen = BytesIO()
                 wb_gen.save(out_gen)
-                st.download_button("📥 下载生成的文件", out_gen.getvalue(), "New_Coupon.xlsx")
+                # 将生成好的文件存入 session_state
+                st.session_state.generated_file = out_gen.getvalue()
+                st.session_state.file_ready = True
+
+        # --- 下载按钮放在表单外面 ---
+        if st.session_state.get('file_ready'):
+            st.success("✅ 文件生成成功，请点击下方按钮下载。")
+            st.download_button(
+                label="📥 点击下载提报 Excel",
+                data=st.session_state.generated_file,
+                file_name="New_Coupon_Request.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
 # --- 第二阶段逻辑 ---
 with tab2:
